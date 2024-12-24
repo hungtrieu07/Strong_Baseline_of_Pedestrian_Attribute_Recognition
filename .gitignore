@@ -3,3 +3,4 @@ __pycache__
 exp_result
 *.csv
 annotated_results
+img_model
