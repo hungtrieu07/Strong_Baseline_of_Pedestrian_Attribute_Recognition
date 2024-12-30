@@ -111,9 +111,6 @@ def main(args):
     if torch.cuda.is_available():
         model = model.cuda()
 
-    # Load checkpoint if required
-    model = load_checkpoint_without_dataparallel(save_model_path, model)
-
     criterion = CEL_Sigmoid(sample_weight)
 
     param_groups = [{'params': model.finetune_params(), 'lr': args.lr_ft},

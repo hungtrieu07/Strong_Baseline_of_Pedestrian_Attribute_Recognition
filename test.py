@@ -6,14 +6,18 @@ from PIL import Image
 from ultralytics import YOLO
 from torchvision.transforms import Compose
 
-from dataset.AttrDataset import get_transform
+from dataset.AttrDataset import AttrDataset, get_transform
 from models.base_block import FeatClassifier, BaseClassifier
-from models.resnet import resnet50
+from models.resnet import resnet18
 from tools.function import get_model_log_path
 from tools.utils import set_seed
 
 set_seed(605)
 
+def remove_module_prefix(state_dict):
+    """Remove 'module.' prefix from keys in state_dict."""
+    new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    return new_state_dict
 
 def process_frame(frame, yolo_model, reid_model, transform, attr_names):
     """
@@ -74,25 +78,26 @@ def main(args):
     yolo_model = YOLO("yolov8n.pt")  # Replace with your YOLO model path if needed
 
     # Load ReID model
-    exp_dir = os.path.join('exp_result', args.dataset)
-    model_dir, _ = get_model_log_path(exp_dir, args.dataset)
-    save_model_path = os.path.join(model_dir, 'ckpt_max.pth')
+    save_model_path = r"exp_result\PETA\resnet18\PETA\img_model\ckpt_max.pth"
 
     train_tsfm, valid_tsfm = get_transform(args)
+    
+    valid_set = AttrDataset(args=args, split=args.valid_split, transform=valid_tsfm)
+    
+    # Get attribute names dynamically
+    attr_names = valid_set.attr_id
 
-    backbone = resnet50()
-    classifier = BaseClassifier(nattr=args.attr_num)
+    backbone = resnet18()
+    classifier = BaseClassifier(nattr=valid_set.attr_num, input_dim=512)
     reid_model = FeatClassifier(backbone, classifier)
 
     if torch.cuda.is_available():
-        reid_model = torch.nn.DataParallel(reid_model).cuda()
+        reid_model = reid_model.cuda()  # Avoid DataParallel
 
     # Load the trained ReID model
     checkpoint = torch.load(save_model_path)
-    reid_model.load_state_dict(checkpoint['state_dicts'])
-
-    # Attribute names (replace with actual attribute names from your dataset)
-    attr_names = [f"Attr_{i}" for i in range(args.attr_num)]
+    state_dict = remove_module_prefix(checkpoint['state_dicts'])
+    reid_model.load_state_dict(state_dict)
 
     # Load video
     video_path = args.video_path
@@ -124,8 +129,7 @@ def main(args):
 if __name__ == '__main__':
     from config import argument_parser
     parser = argument_parser()
-    parser.add_argument('--video_path', type=str, default='test_video.mp4', help='Path to the input video.')
-    parser.add_argument('--dataset', type=str, default='your_dataset', help='Dataset name.')
-    parser.add_argument('--attr_num', type=int, default=20, help='Number of attributes.')
+    parser.add_argument('--video_path', type=str, default='test_video.avi', help='Path to the input video.')
+    parser.add_argument('--dataset', type=str, default='PETA', help='Dataset name.')
     args = parser.parse_args()
     main(args)

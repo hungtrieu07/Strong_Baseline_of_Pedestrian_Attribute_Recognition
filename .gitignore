@@ -5,3 +5,6 @@ exp_result
 annotated_results
 img_model
 onnx_models
+factory.mp4
+test_video.avi
+*.pt
