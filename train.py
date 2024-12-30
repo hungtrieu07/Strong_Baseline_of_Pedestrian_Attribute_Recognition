@@ -12,16 +12,25 @@ from config import argument_parser
 from dataset.AttrDataset import AttrDataset, get_transform
 from loss.CE_loss import CEL_Sigmoid
 from models.base_block import FeatClassifier, BaseClassifier
-from models.resnet import resnet50
+from models.resnet import resnet18, resnet34, resnet50, resnet101, resnet152, resnext50_32x4d, resnext101_32x8d
 from tools.function import get_model_log_path, get_pedestrian_metrics
 from tools.utils import time_str, save_ckpt, ReDirectSTD, set_seed
 
 set_seed(605)
 
+def load_checkpoint_without_dataparallel(checkpoint_path, model):
+    checkpoint = torch.load(checkpoint_path)
+    state_dict = checkpoint['state_dicts']  # Adjust based on your checkpoint structure
+
+    # Remove 'module.' prefix if present
+    new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    model.load_state_dict(new_state_dict)
+    return model
 
 def main(args):
     visenv_name = args.dataset
-    exp_dir = os.path.join('exp_result', args.dataset)
+    exp_dir = os.path.join('exp_result', args.dataset, args.model)
+    os.makedirs(exp_dir, exist_ok=True)
     model_dir, log_dir = get_model_log_path(exp_dir, visenv_name)
     stdout_file = os.path.join(log_dir, f'stdout_{time_str()}.txt')
     save_model_path = os.path.join(model_dir, 'ckpt_max.pth')
@@ -65,17 +74,50 @@ def main(args):
     labels = train_set.label
     sample_weight = labels.mean(0)
 
-    backbone = resnet50()
-    classifier = BaseClassifier(nattr=train_set.attr_num)
+    if args.model == 'resnet18':
+        backbone = resnet18()
+        feature_dim = 512
+        print("Using resnet18 as backbone, feature_dim = 512")
+    elif args.model == 'resnet34':
+        backbone = resnet34()
+        feature_dim = 512
+        print("Using resnet34 as backbone, feature_dim = 512")
+    elif args.model == 'resnet50':
+        backbone = resnet50()
+        feature_dim = 2048
+        print("Using resnet50 as backbone, feature_dim = 2048")
+    elif args.model == 'resnet101':
+        backbone = resnet101()
+        feature_dim = 2048
+        print("Using resnet101 as backbone, feature_dim = 2048")
+    elif args.model == 'resnet152':
+        backbone = resnet152()
+        feature_dim = 2048
+        print("Using resnet152 as backbone, feature_dim = 2048")
+    elif args.model == 'resnext50_32x4d':
+        backbone = resnext50_32x4d()
+        feature_dim = 2048
+        print("Using resnext50_32x4d as backbone, feature_dim = 2048")
+    elif args.model == 'resnext101_32x8d':
+        backbone = resnext101_32x8d()
+        feature_dim = 2048
+        print("Using resnext101_32x8d as backbone, feature_dim = 2048")
+    else:
+        raise ValueError(f"model {args.model} is not defined")
+        
+    classifier = BaseClassifier(nattr=train_set.attr_num, input_dim=feature_dim)
     model = FeatClassifier(backbone, classifier)
 
     if torch.cuda.is_available():
-        model = torch.nn.DataParallel(model).cuda()
+        model = model.cuda()
+
+    # Load checkpoint if required
+    model = load_checkpoint_without_dataparallel(save_model_path, model)
 
     criterion = CEL_Sigmoid(sample_weight)
 
-    param_groups = [{'params': model.module.finetune_params(), 'lr': args.lr_ft},
-                    {'params': model.module.fresh_params(), 'lr': args.lr_new}]
+    param_groups = [{'params': model.finetune_params(), 'lr': args.lr_ft},
+                    {'params': model.fresh_params(), 'lr': args.lr_new}]
     optimizer = torch.optim.SGD(param_groups, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=False)
     lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=4)
 
@@ -88,8 +130,7 @@ def main(args):
                                  lr_scheduler=lr_scheduler,
                                  path=save_model_path)
 
-    print(f'{visenv_name},  best_metrc : {best_metric} in epoch{epoch}')
-
+    print(f'{visenv_name},  best_metric : {best_metric} in epoch {epoch}')
 
 def trainer(epoch, model, train_loader, valid_loader, criterion, optimizer, lr_scheduler,
             path):

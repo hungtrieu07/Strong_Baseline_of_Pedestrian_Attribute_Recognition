@@ -4,3 +4,4 @@ exp_result
 *.csv
 annotated_results
 img_model
+onnx_models

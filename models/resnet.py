@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.hub import load_state_dict_from_url
 import torch
 import torch.nn.functional as F
+from torchinfo import summary
 
 import torchvision.models.resnet
 
@@ -320,7 +321,7 @@ def resnext101_32x8d(pretrained=False, progress=True, **kwargs):
 if __name__ == '__main__':
     # print(resnet50())
     model = resnet50().cuda()
-    x = torch.rand((1, 3, 256, 128)).cuda()
-    model(x)
+    x = torch.rand((1, 3, 256, 192)).cuda()
+    summary(model)
 
     # print('receptive_field_dict')

@@ -1,0 +1,7 @@
+python export_to_onnx.py --model_path "exp_result/PETA/resnet18/PETA/img_model/ckpt_max.pth"
+python export_to_onnx.py --model_path "exp_result/PETA/resnet34/PETA/img_model/ckpt_max.pth"
+python export_to_onnx.py --model_path "exp_result/PETA/resnet50/PETA/img_model/ckpt_max.pth"
+python export_to_onnx.py --model_path "exp_result/PETA/resnet101/PETA/img_model/ckpt_max.pth"
+python export_to_onnx.py --model_path "exp_result/PETA/resnet152/PETA/img_model/ckpt_max.pth"
+python export_to_onnx.py --model_path "exp_result/PETA/resnext50_32x4d/PETA/img_model/ckpt_max.pth"
+python export_to_onnx.py --model_path "exp_result/PETA/resnext101_32x8d/PETA/img_model/ckpt_max.pth"

@@ -7,6 +7,7 @@ def argument_parser():
 
     parser.add_argument("dataset", type=str, default="RAP")
     parser.add_argument("--debug", action='store_false')
+    parser.add_argument("--model", type=str, default="resnet50", choices=['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'resnext50_32x4d', 'resnext101_32x8d'])
 
     parser.add_argument("--batchsize", type=int, default=32)
     parser.add_argument("--train_epoch", type=int, default=30)
