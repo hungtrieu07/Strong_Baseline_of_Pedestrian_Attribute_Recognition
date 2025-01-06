@@ -7,213 +7,395 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchvision import transforms, models
+import torchvision.transforms as T
+import torch.nn.functional as F
 from PIL import Image
 from easydict import EasyDict
 from scipy.io import loadmat
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from tqdm import tqdm
+import math
+from collections import defaultdict
+from tools.function import ratio2weight
+from tools.utils import AverageMeter, time_str, to_scalar, save_ckpt
+from torch.nn.utils import clip_grad_norm_
 
 np.random.seed(0)
 random.seed(0)
-
-group_order = [10, 18, 19, 30, 15, 7, 9, 11, 14, 21, 26, 29, 32, 33, 34, 6, 8, 12, 25, 27, 31, 13, 23, 24, 28, 4, 5,
-               17, 20, 22, 0, 1, 2, 3, 16]
 
 def make_dir(path):
     if not os.path.exists(path):
         os.mkdir(path)
 
-def generate_data_description(save_dir, reorder):
-    """
-    Create a dataset description file, which consists of images and labels
-    """
-    peta_data = loadmat(os.path.join(save_dir, 'PETA.mat'))
-    dataset = EasyDict()
-    dataset.description = 'peta'
-    dataset.reorder = 'group_order'
-    dataset.root = os.path.join(save_dir, 'images')
-    dataset.image_name = [f'{i + 1:05}.png' for i in range(19000)]
+def get_transform(args):
+    height = args.height
+    width = args.width
+    normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    train_transform = T.Compose([
+        T.Resize((height, width)),
+        T.Pad(10),
+        T.RandomCrop((height, width)),
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        normalize,
+    ])
 
-    raw_attr_name = [i[0][0] for i in peta_data['peta'][0][0][1]]
-    raw_label = peta_data['peta'][0][0][0][:, 4:]
+    valid_transform = T.Compose([
+        T.Resize((height, width)),
+        T.ToTensor(),
+        normalize
+    ])
 
-    dataset.label = raw_label[:, :35]
-    dataset.attr_name = raw_attr_name[:35]
-    if reorder:
-        dataset.label = dataset.label[:, np.array(group_order)]
-        dataset.attr_name = [dataset.attr_name[i] for i in group_order]
+    return train_transform, valid_transform
 
-    dataset.partition = EasyDict()
-    dataset.partition.train = []
-    dataset.partition.val = []
-    dataset.partition.trainval = []
-    dataset.partition.test = []
+class AttrDataset(Dataset):
 
-    dataset.weight_train = []
-    dataset.weight_trainval = []
+    def __init__(self, split, args, transform=None, target_transform=None):
 
-    for idx in range(5):
-        train = peta_data['peta'][0][0][3][idx][0][0][0][0][:, 0] - 1
-        val = peta_data['peta'][0][0][3][idx][0][0][0][1][:, 0] - 1
-        test = peta_data['peta'][0][0][3][idx][0][0][0][2][:, 0] - 1
-        trainval = np.concatenate((train, val), axis=0)
+        data_path = os.path.join("./data", f"{args.dataset}", 'custom_dataset.pkl')
+        dataset_info = pickle.load(open(data_path, 'rb+'))
 
-        dataset.partition.train.append(train)
-        dataset.partition.val.append(val)
-        dataset.partition.trainval.append(trainval)
-        dataset.partition.test.append(test)
+        img_id = dataset_info.image_name
+        attr_label = dataset_info.label
 
-        weight_train = np.mean(dataset.label[train], axis=0)
-        weight_trainval = np.mean(dataset.label[trainval], axis=0)
+        assert split in dataset_info.partition.keys(), f'split {split} is not exist'
 
-        dataset.weight_train.append(weight_train)
-        dataset.weight_trainval.append(weight_trainval)
-
-    with open(os.path.join(save_dir, 'dataset.pkl'), 'wb+') as f:
-        pickle.dump(dataset, f)
-
-class PETADataset(Dataset):
-    def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths
-        self.labels = labels
+        self.dataset = args.dataset
         self.transform = transform
+        self.target_transform = target_transform
+
+        self.root_path = dataset_info.root
+
+        self.attr_id = dataset_info.attr_name
+        self.attr_num = len(self.attr_id)
+
+        self.img_idx = dataset_info.partition[split]
+
+        if isinstance(self.img_idx, list):
+            self.img_idx = self.img_idx[0]  # default partition 0
+        self.img_num = self.img_idx.shape[0]
+        self.img_id = [img_id[i] for i in self.img_idx]
+        self.label = attr_label[self.img_idx]
+
+    def __getitem__(self, index):
+
+        imgname, gt_label, imgidx = self.img_id[index], self.label[index], self.img_idx[index]
+        imgpath = os.path.join(self.root_path, imgname)
+        img = Image.open(imgpath)
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        gt_label = gt_label.astype(np.float32)
+
+        if self.target_transform is not None:
+            gt_label = self.transform(gt_label)
+
+        return img, gt_label, imgname
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.img_id)
 
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        labels = torch.tensor(self.labels[idx], dtype=torch.float32)
+class BaseClassifier(nn.Module):
+    def __init__(self, nattr, input_dim=2048):
+        super().__init__()
+        self.logits = nn.Sequential(
+            nn.Linear(input_dim, nattr),
+            nn.BatchNorm1d(nattr)
+        )
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
 
-        image = Image.open(image_path).convert('RGB')
+    def fresh_params(self):
+        return self.parameters()
 
-        if self.transform:
-            image = self.transform(image)
+    def forward(self, feature):
+        feat = self.avg_pool(feature).view(feature.size(0), -1)
+        x = self.logits(feat)
+        return x
 
-        return image, labels
+def initialize_weights(module):
+    for m in module.children():
+        if isinstance(m, nn.Conv2d):
+            n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+            m.weight.data.normal_(0, math.sqrt(2. / n))
+        elif isinstance(m, nn.BatchNorm2d):
+            m.weight.data.fill_(1)
+            if m.bias is not None:
+                m.bias.data.zero_()
+        elif isinstance(m, nn.Linear):
+            stdv = 1. / math.sqrt(m.weight.size(1))
+            m.weight.data.uniform_(-stdv, stdv)
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=10, save_path='model.pth', log_path='training.log'):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = model.to(device)
+class FeatClassifier(nn.Module):
 
-    best_val_loss = float('inf')
+    def __init__(self, backbone, classifier):
+        super(FeatClassifier, self).__init__()
 
-    with open(log_path, 'w') as log_file:
-        for epoch in range(num_epochs):
-            model.train()
-            train_loss = 0.0
-            with tqdm(total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs} - Training") as pbar:
-                for inputs, targets in train_loader:
-                    inputs, targets = inputs.to(device), targets.to(device)
+        self.backbone = backbone
+        self.classifier = classifier
 
-                    optimizer.zero_grad()
-                    outputs = model(inputs)
-                    loss = criterion(outputs, targets)
-                    loss.backward()
-                    optimizer.step()
+    def fresh_params(self):
+        params = self.classifier.fresh_params()
+        return params
 
-                    train_loss += loss.item() * inputs.size(0)
-                    pbar.set_postfix({'Train Loss': loss.item()})
-                    pbar.update(1)
+    def finetune_params(self):
+        return self.backbone.parameters()
 
-            train_loss /= len(train_loader.dataset)
-            train_log = f"Epoch {epoch+1}/{num_epochs}, Training Loss: {train_loss:.4f}"
-            print(train_log)
-            log_file.write(train_log + '\n')
+    def forward(self, x, label=None):
+        feat_map = self.backbone(x)
+        logits = self.classifier(feat_map)
+        return logits
 
-            model.eval()
-            val_loss = 0.0
-            all_targets = []
-            all_preds = []
+def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None):
+    pred_label = preds_probs > threshold
 
-            with torch.no_grad():
-                with tqdm(total=len(val_loader), desc=f"Epoch {epoch+1}/{num_epochs} - Validation") as pbar:
-                    for inputs, targets in val_loader:
-                        inputs, targets = inputs.to(device), targets.to(device)
+    eps = 1e-20
+    result = EasyDict()
 
-                        outputs = model(inputs)
-                        loss = criterion(outputs, targets)
+    ###############################
+    # label metrics
+    gt_pos = np.sum((gt_label == 1), axis=0).astype(float)
+    gt_neg = np.sum((gt_label == 0), axis=0).astype(float)
+    true_pos = np.sum((gt_label == 1) * (pred_label == 1), axis=0).astype(float)
+    true_neg = np.sum((gt_label == 0) * (pred_label == 0), axis=0).astype(float)
+    false_pos = np.sum(((gt_label == 0) * (pred_label == 1)), axis=0).astype(float)
+    false_neg = np.sum(((gt_label == 1) * (pred_label == 0)), axis=0).astype(float)
 
-                        val_loss += loss.item() * inputs.size(0)
+    label_pos_recall = 1.0 * true_pos / (gt_pos + eps)
+    label_neg_recall = 1.0 * true_neg / (gt_neg + eps)
+    label_ma = (label_pos_recall + label_neg_recall) / 2
 
-                        preds = (torch.sigmoid(outputs) > 0.5).float()
-                        all_preds.append(preds.cpu())
-                        all_targets.append(targets.cpu())
+    result.label_pos_recall = label_pos_recall
+    result.label_neg_recall = label_neg_recall
+    result.label_prec = true_pos / (true_pos + false_pos + eps)
+    result.label_acc = true_pos / (true_pos + false_pos + false_neg + eps)
+    result.label_f1 = 2 * result.label_prec * result.label_pos_recall / (
+            result.label_prec + result.label_pos_recall + eps)
 
-                        pbar.set_postfix({'Val Loss': loss.item()})
-                        pbar.update(1)
+    result.label_ma = label_ma
+    result.ma = np.mean(label_ma)
 
-            val_loss /= len(val_loader.dataset)
-            all_preds = torch.cat(all_preds, dim=0).numpy()
-            all_targets = torch.cat(all_targets, dim=0).numpy()
-            accuracy = accuracy_score(all_targets, all_preds)
+    ################
+    # instance metrics
+    gt_pos = np.sum((gt_label == 1), axis=1).astype(float)
+    true_pos = np.sum((pred_label == 1), axis=1).astype(float)
+    intersect_pos = np.sum((gt_label == 1) * (pred_label == 1), axis=1).astype(float)
+    union_pos = np.sum(((gt_label == 1) + (pred_label == 1)), axis=1).astype(float)
 
-            val_log = f"Epoch {epoch+1}/{num_epochs}, Validation Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}"
-            print(val_log)
-            log_file.write(val_log + '\n')
+    instance_acc = intersect_pos / (union_pos + eps)
+    instance_prec = intersect_pos / (true_pos + eps)
+    instance_recall = intersect_pos / (gt_pos + eps)
+    instance_f1 = 2 * instance_prec * instance_recall / (instance_prec + instance_recall + eps)
 
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(model.state_dict(), save_path)
-                model_log = f"Model improved. Saved to {save_path}"
-                print(model_log)
-                log_file.write(model_log + '\n')
+    instance_acc = np.mean(instance_acc)
+    instance_prec = np.mean(instance_prec)
+    instance_recall = np.mean(instance_recall)
+    instance_f1 = np.mean(instance_f1)
+
+    result.instance_acc = instance_acc
+    result.instance_prec = instance_prec
+    result.instance_recall = instance_recall
+    result.instance_f1 = instance_f1
+
+    result.error_num, result.fn_num, result.fp_num = false_pos + false_neg, false_neg, false_pos
+
+    # Log per-class metrics
+    if log_file:
+        with open(log_file, "a") as f:
+            f.write("Per-Class Metrics:\n")
+            for cls in range(gt_label.shape[1]):
+                precision = true_pos[cls] / (true_pos[cls] + false_pos[cls] + eps)
+                recall = true_pos[cls] / (gt_pos[cls] + eps)
+                f1 = 2 * precision * recall / (precision + recall + eps)
+                accuracy = (true_pos[cls] + true_neg[cls]) / (gt_pos[cls] + gt_neg[cls] + eps)
+
+                f.write(f"Class {cls}: Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, Accuracy: {accuracy:.4f}\n")
+
+    return result
+
+class CEL_Sigmoid(nn.Module):
+
+    def __init__(self, sample_weight=None, size_average=True):
+        super(CEL_Sigmoid, self).__init__()
+
+        self.sample_weight = sample_weight
+        self.size_average = size_average
+
+    def forward(self, logits, targets):
+        batch_size = logits.shape[0]
+
+        loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+
+        targets_mask = torch.where(targets.detach().cpu() > 0.5, torch.ones(1), torch.zeros(1))
+        if self.sample_weight is not None:
+            weight = ratio2weight(targets_mask, self.sample_weight)
+            loss = (loss * weight.cuda())
+
+        loss = loss.sum() / batch_size if self.size_average else loss.sum()
+
+        return loss
+
+def batch_trainer(epoch, model, train_loader, criterion, optimizer):
+    model.train()
+    loss_meter = AverageMeter()
+
+    gt_list = []
+    preds_probs = []
+
+    for step, (imgs, gt_label, _) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} Training")):
+        imgs, gt_label = imgs.cuda(), gt_label.cuda()
+
+        optimizer.zero_grad()
+        train_logits = model(imgs, gt_label)
+        train_loss = criterion(train_logits, gt_label)
+
+        train_loss.backward()
+        clip_grad_norm_(model.parameters(), max_norm=10.0)
+        optimizer.step()
+
+        loss_meter.update(to_scalar(train_loss))
+        gt_list.append(gt_label.cpu().numpy())
+        train_probs = torch.sigmoid(train_logits)
+        preds_probs.append(train_probs.detach().cpu().numpy())
+
+    train_loss = loss_meter.avg
+    gt_label = np.concatenate(gt_list, axis=0)
+    preds_probs = np.concatenate(preds_probs, axis=0)
+
+    return train_loss, gt_label, preds_probs
+
+@torch.no_grad()
+def valid_trainer(model, valid_loader, criterion):
+    model.eval()
+    loss_meter = AverageMeter()
+
+    preds_probs = []
+    gt_list = []
+    for step, (imgs, gt_label, _) in enumerate(tqdm(valid_loader, desc="Validation")):
+        imgs, gt_label = imgs.cuda(), gt_label.cuda()
+        gt_list.append(gt_label.cpu().numpy())
+        valid_labels = gt_label.clone()
+        valid_labels[valid_labels == -1] = 0
+
+        valid_logits = model(imgs)
+        valid_loss = criterion(valid_logits, valid_labels)
+        valid_probs = torch.sigmoid(valid_logits)
+        preds_probs.append(valid_probs.cpu().numpy())
+        loss_meter.update(to_scalar(valid_loss))
+
+    valid_loss = loss_meter.avg
+    gt_label = np.concatenate(gt_list, axis=0)
+    preds_probs = np.concatenate(preds_probs, axis=0)
+
+    return valid_loss, gt_label, preds_probs
+
+def trainer(epoch, model, train_loader, valid_loader, criterion, optimizer, lr_scheduler, path):
+    maximum = float(-np.inf)
+    best_epoch = 0
+
+    result_list = defaultdict()
+    
+    log_file = os.path.join(os.path.dirname(path), 'class_metrics.log')
+
+    for i in range(epoch):
+
+        train_loss, train_gt, train_probs = batch_trainer(
+            epoch=i,
+            model=model,
+            train_loader=train_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+        )
+
+        valid_loss, valid_gt, valid_probs = valid_trainer(
+            model=model,
+            valid_loader=valid_loader,
+            criterion=criterion,
+        )
+
+        lr_scheduler.step(metrics=valid_loss, epoch=i)
+
+        train_result = get_pedestrian_metrics(train_gt, train_probs, log_file=log_file)
+        valid_result = get_pedestrian_metrics(valid_gt, valid_probs, log_file=log_file)
+
+        print(f'Evaluation on test set, \n',
+              'ma: {:.4f},  pos_recall: {:.4f} , neg_recall: {:.4f} \n'.format(
+                  valid_result.ma, np.mean(valid_result.label_pos_recall), np.mean(valid_result.label_neg_recall)),
+              'Acc: {:.4f}, Prec: {:.4f}, Rec: {:.4f}, F1: {:.4f}'.format(
+                  valid_result.instance_acc, valid_result.instance_prec, valid_result.instance_recall,
+                  valid_result.instance_f1))
+
+        print(f'{time_str()}')
+        print('-' * 60)
+
+        cur_metric = valid_result.ma
+
+        if cur_metric > maximum:
+            maximum = cur_metric
+            best_epoch = i
+            save_ckpt(model, path, i, maximum)
+
+        result_list[i] = [train_result, valid_result]
+
+    torch.save(result_list, os.path.join(os.path.dirname(path), 'metric_log.pkl'))
+
+    return maximum, best_epoch
 
 if __name__ == "__main__":
     save_dir = './data/PETA/'
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    os.makedirs("exp_result/resnet34", exist_ok=True)
+
+    class Args:
+        dataset = 'PETA'
+        height = 256
+        width = 192
+        lr_ft = 0.01
+        lr_new = 0.1
+        momentum = 0.9
+        weight_decay = 5e-4
+
+    args = Args()
+
+    train_transform, valid_transform = get_transform(args)
+
+    train_dataset = AttrDataset(split='train', args=args, transform=train_transform)
+    val_dataset = AttrDataset(split='val', args=args, transform=valid_transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+
+    labels = train_dataset.label
+    sample_weight = labels.mean(0)
     
-    os.makedirs("exp_result/resnet50", exist_ok=True)
+    print(train_dataset.attr_num)
 
-    # Generate the dataset description
-    generate_data_description(save_dir, True)
+    backbone = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)
+    backbone = nn.Sequential(*list(backbone.children())[:-2]).to(device)  # Move backbone to device
 
-    # Load dataset description
-    with open(os.path.join(save_dir, 'dataset.pkl'), 'rb+') as f:
-        dataset = pickle.load(f)
+    classifier = BaseClassifier(nattr=train_dataset.attr_num, input_dim=512).to(device)  # Move classifier to device
 
-    train_transform = transforms.Compose([
-        transforms.Resize((256, 192)),
-        transforms.Pad(10),
-        transforms.RandomCrop((256, 192)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    model = FeatClassifier(backbone=backbone, classifier=classifier).to(device)
+    initialize_weights(classifier)
+
+    criterion = CEL_Sigmoid(sample_weight)
+
+    param_groups = [{'params': model.finetune_params(), 'lr': args.lr_ft},
+                    {'params': model.fresh_params(), 'lr': args.lr_new}]
+    optimizer = torch.optim.SGD(param_groups, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=False)
+    lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=4)
+
+    best_metric, epoch = trainer(epoch=100,
+                                model=model,
+                                train_loader=train_loader,
+                                valid_loader=val_loader,
+                                criterion=criterion,
+                                optimizer=optimizer,
+                                lr_scheduler=lr_scheduler,
+                                path='exp_result/resnet34/peta_feat_classifier.pth')
     
-    valid_transform = transforms.Compose([
-        transforms.Resize((256, 192)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-    train_indices = dataset.partition.train[0]
-    val_indices = dataset.partition.val[0]
-
-    train_dataset = PETADataset(
-        [os.path.join(dataset.root, dataset.image_name[i]) for i in train_indices],
-        dataset.label[train_indices],
-        transform=train_transform,
-    )
-
-    val_dataset = PETADataset(
-        [os.path.join(dataset.root, dataset.image_name[i]) for i in val_indices],
-        dataset.label[val_indices],
-        transform=valid_transform,
-    )
-
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-
-    num_labels = dataset.label.shape[1]
-    model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-    model.fc = nn.Linear(model.fc.in_features, num_labels)
-
-    weight_train = torch.tensor(dataset.weight_train[0], dtype=torch.float32).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=weight_train)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=300, save_path='exp_result/resnet50/peta_resnet50.pth', log_path='exp_result/resnet50/peta_resnet50.log')
+    print(f'best_metrc : {best_metric} in epoch{epoch}')

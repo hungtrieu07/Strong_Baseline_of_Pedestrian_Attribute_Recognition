@@ -8,7 +8,7 @@ from torchvision.transforms import Compose
 
 from dataset.AttrDataset import AttrDataset, get_transform
 from models.base_block import FeatClassifier, BaseClassifier
-from models.resnet import resnet18
+from models.resnet import resnet18, resnet50
 from tools.function import get_model_log_path
 from tools.utils import set_seed
 
@@ -78,7 +78,7 @@ def main(args):
     yolo_model = YOLO("yolov8n.pt")  # Replace with your YOLO model path if needed
 
     # Load ReID model
-    save_model_path = r"exp_result\PETA\resnet18\PETA\img_model\ckpt_max.pth"
+    save_model_path = r"exp_result/PETA/resnet50/PETA/img_model/ckpt_max.pth"
 
     train_tsfm, valid_tsfm = get_transform(args)
     
@@ -87,12 +87,12 @@ def main(args):
     # Get attribute names dynamically
     attr_names = valid_set.attr_id
 
-    backbone = resnet18()
-    classifier = BaseClassifier(nattr=valid_set.attr_num, input_dim=512)
+    backbone = resnet50()
+    classifier = BaseClassifier(nattr=41, input_dim=2048)
     reid_model = FeatClassifier(backbone, classifier)
 
     if torch.cuda.is_available():
-        reid_model = reid_model.cuda()  # Avoid DataParallel
+        reid_model = reid_model.cuda()
 
     # Load the trained ReID model
     checkpoint = torch.load(save_model_path)
