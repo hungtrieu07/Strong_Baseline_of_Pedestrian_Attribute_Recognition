@@ -1,35 +1,40 @@
 import os
-import torch
 import cv2
 import numpy as np
 from PIL import Image
 from ultralytics import YOLO
-from torchvision.transforms import Compose
-
+import onnxruntime as ort
 from dataset.AttrDataset import AttrDataset, get_transform
-from models.base_block import FeatClassifier, BaseClassifier
-from models.resnet import resnet18, resnet50
-from tools.function import get_model_log_path
 from tools.utils import set_seed
+import torch
+
 
 set_seed(605)
 
-def remove_module_prefix(state_dict):
-    """Remove 'module.' prefix from keys in state_dict."""
-    new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-    return new_state_dict
-
-def process_frame(frame, yolo_model, reid_model, transform, attr_names):
+def preprocess_image(image, input_size=(256, 192)):
     """
-    Process a single video frame: detect persons, crop, and perform ReID.
-    
+    Preprocess the cropped person image to match ONNX model input.
+    Args:
+        image (PIL.Image): Cropped image of the person.
+        input_size (tuple): Target size for the model (height, width).
+    Returns:
+        np.ndarray: Preprocessed image.
+    """
+    image = image.resize(input_size[::-1], Image.BILINEAR)  # Resize to (width, height)
+    image = np.array(image).astype(np.float32) / 255.0     # Normalize to [0, 1]
+    image = image.transpose(2, 0, 1)                       # HWC to CHW
+    image = np.expand_dims(image, axis=0)                  # Add batch dimension
+    return image
+
+
+def process_frame(frame, yolo_model, onnx_session, attr_names):
+    """
+    Process a single video frame: detect persons, crop, and perform ReID using ONNX model.
     Args:
         frame (ndarray): Video frame.
         yolo_model (YOLO): YOLO detection model.
-        reid_model (torch.nn.Module): Trained ReID model.
-        transform (Compose): Transformations for the ReID model.
+        onnx_session (ort.InferenceSession): ONNX Runtime inference session for ReID model.
         attr_names (list): List of attribute names.
-        
     Returns:
         frame (ndarray): Annotated video frame.
     """
@@ -39,32 +44,29 @@ def process_frame(frame, yolo_model, reid_model, transform, attr_names):
     
     for detection in detections:
         x1, y1, x2, y2, conf, cls = map(int, detection[:6])
-        if int(cls) != 0:  # Only process persons (class 0 in COCO)
+        if cls != 0:  # Only process persons (class 0 in COCO)
             continue
 
         # Crop the person
         person_crop = frame[y1:y2, x1:x2]
         if person_crop.size == 0:
             continue
-        
-        # Convert to PIL Image and apply transforms
+
+        # Preprocess the person image
         person_image = Image.fromarray(cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB))
-        person_trans = transform(person_image).unsqueeze(0)  # Add batch dimension
+        input_data = preprocess_image(person_image)
 
-        if torch.cuda.is_available():
-            person_trans = person_trans.cuda()
-
-        # Perform ReID inference
-        reid_model.eval()
-        with torch.no_grad():
-            outputs = reid_model(person_trans)
-            probs = torch.sigmoid(outputs).cpu().numpy()[0]
+        # Perform ReID inference using ONNX model
+        input_name = onnx_session.get_inputs()[0].name
+        output_name = onnx_session.get_outputs()[0].name
+        reid_output = onnx_session.run([output_name], {input_name: input_data})[0][0]
+        reid_output = torch.sigmoid(torch.tensor(reid_output)).numpy()
 
         # Get top 5 attributes
-        top5_indices = np.argsort(probs)[-5:][::-1]  # Indices of top 5 attributes
-        top5_attrs = [(attr_names[i], probs[i]) for i in top5_indices]
+        top5_indices = np.argsort(reid_output)[-5:][::-1]
+        top5_attrs = [(attr_names[i], reid_output[i]) for i in top5_indices]
 
-        # Annotate frame with ReID results
+        # Annotate the frame
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         for i, (attr, prob) in enumerate(top5_attrs):
             text = f"{attr}: {prob:.2f}"
@@ -72,32 +74,18 @@ def process_frame(frame, yolo_model, reid_model, transform, attr_names):
 
     return frame
 
-
 def main(args):
     # Load YOLO model
     yolo_model = YOLO("yolov8n.pt")  # Replace with your YOLO model path if needed
 
-    # Load ReID model
-    save_model_path = r"exp_result/PETA/resnet50/PETA/img_model/ckpt_max.pth"
+    # Load ONNX ReID model
+    onnx_model_path = "onnx_models/reid_model.onnx"  # Path to your ONNX model
+    onnx_session = ort.InferenceSession(onnx_model_path)
 
-    train_tsfm, valid_tsfm = get_transform(args)
-    
+    # Load attribute names
+    _, valid_tsfm = get_transform(args)
     valid_set = AttrDataset(args=args, split=args.valid_split, transform=valid_tsfm)
-    
-    # Get attribute names dynamically
     attr_names = valid_set.attr_id
-
-    backbone = resnet50()
-    classifier = BaseClassifier(nattr=41, input_dim=2048)
-    reid_model = FeatClassifier(backbone, classifier)
-
-    if torch.cuda.is_available():
-        reid_model = reid_model.cuda()
-
-    # Load the trained ReID model
-    checkpoint = torch.load(save_model_path)
-    state_dict = remove_module_prefix(checkpoint['state_dicts'])
-    reid_model.load_state_dict(state_dict)
 
     # Load video
     video_path = args.video_path
@@ -113,7 +101,7 @@ def main(args):
             break
 
         # Process the frame
-        annotated_frame = process_frame(frame, yolo_model, reid_model, valid_tsfm, attr_names)
+        annotated_frame = process_frame(frame, yolo_model, onnx_session, attr_names)
 
         # Display the frame
         cv2.imshow("Video", annotated_frame)

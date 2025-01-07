@@ -8,3 +8,5 @@ onnx_models
 factory.mp4
 test_video.avi
 *.pt
+*.zip
+openvino_models
