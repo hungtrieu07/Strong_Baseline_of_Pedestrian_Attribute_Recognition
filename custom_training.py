@@ -149,7 +149,7 @@ class FeatClassifier(nn.Module):
         logits = self.classifier(feat_map)
         return logits
 
-def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None):
+def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None, validated=False):
     pred_label = preds_probs > threshold
 
     eps = 1e-20
@@ -163,6 +163,12 @@ def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None):
     true_neg = np.sum((gt_label == 0) * (pred_label == 0), axis=0).astype(float)
     false_pos = np.sum(((gt_label == 0) * (pred_label == 1)), axis=0).astype(float)
     false_neg = np.sum(((gt_label == 1) * (pred_label == 0)), axis=0).astype(float)
+    
+    if validated:
+        print(true_pos)
+        print(true_pos[0])
+        # print(true_pos.shape)
+        # print(true_neg)
 
     label_pos_recall = 1.0 * true_pos / (gt_pos + eps)
     label_neg_recall = 1.0 * true_neg / (gt_neg + eps)
@@ -203,14 +209,14 @@ def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None):
     result.error_num, result.fn_num, result.fp_num = false_pos + false_neg, false_neg, false_pos
 
     # Log per-class metrics
-    if log_file:
+    if log_file and validated:
         with open(log_file, "a") as f:
             f.write("Per-Class Metrics:\n")
             for cls in range(gt_label.shape[1]):
-                precision = true_pos[cls] / (true_pos[cls] + false_pos[cls] + eps)
-                recall = true_pos[cls] / (gt_pos[cls] + eps)
-                f1 = 2 * precision * recall / (precision + recall + eps)
-                accuracy = (true_pos[cls] + true_neg[cls]) / (gt_pos[cls] + gt_neg[cls] + eps)
+                precision = true_pos[cls] / (true_pos[cls] + false_pos[cls] + eps)  # TP / (TP + FP)
+                recall = true_pos[cls] / (true_pos[cls] + false_neg[cls] + eps)    # TP / (TP + FN)
+                f1 = 2 * precision * recall / (precision + recall + eps)    # 2 * (P * R) / (P + R)
+                accuracy = (true_pos[cls] + true_neg[cls]) / (true_pos[cls] + true_neg[cls] + false_pos[cls] + false_neg[cls] + eps)  # (TP + TN) / (TP + TN + FP + FN)
 
                 f.write(f"Class {cls}: Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, Accuracy: {accuracy:.4f}\n")
 
@@ -318,8 +324,8 @@ def trainer(epoch, model, train_loader, valid_loader, criterion, optimizer, lr_s
 
         lr_scheduler.step(metrics=valid_loss, epoch=i)
 
-        train_result = get_pedestrian_metrics(train_gt, train_probs, log_file=log_file)
-        valid_result = get_pedestrian_metrics(valid_gt, valid_probs, log_file=log_file)
+        train_result = get_pedestrian_metrics(train_gt, train_probs, log_file=log_file, validated=False)
+        valid_result = get_pedestrian_metrics(valid_gt, valid_probs, log_file=log_file, validated=True)
 
         print(f'Evaluation on test set, \n',
               'ma: {:.4f},  pos_recall: {:.4f} , neg_recall: {:.4f} \n'.format(
