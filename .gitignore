@@ -11,3 +11,4 @@ test_video.avi
 *.zip
 openvino_models
 .vscode
+yolo_models
