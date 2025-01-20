@@ -79,7 +79,7 @@ def main(args):
     yolo_model = YOLO("yolov8n.pt")  # Replace with your YOLO model path if needed
 
     # Load ONNX ReID model
-    onnx_model_path = "onnx_models/reid_model.onnx"  # Path to your ONNX model
+    onnx_model_path = "onnx_models/resnet34.onnx"  # Path to your ONNX model
     onnx_session = ort.InferenceSession(onnx_model_path)
 
     # Load attribute names
