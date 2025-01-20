@@ -1,27 +1,30 @@
+import math
 import os
-import numpy as np
-import random
 import pickle
+import random
+from collections import defaultdict
+import shutil
+
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torchvision import transforms, models
-import torchvision.transforms as T
 import torch.nn.functional as F
-from PIL import Image
+import torch.optim as optim
+import torchvision.transforms as T
 from easydict import EasyDict
+from PIL import Image
 from scipy.io import loadmat
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from tqdm import tqdm
-import math
-from collections import defaultdict
-from tools.function import ratio2weight
-from tools.utils import AverageMeter, time_str, to_scalar, save_ckpt
+from sklearn.model_selection import train_test_split
 from torch.nn.utils import clip_grad_norm_
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader, Dataset
+from torchvision import models, transforms
+from tqdm import tqdm
+
+from tools.function import ratio2weight
+from tools.utils import AverageMeter, save_ckpt, time_str, to_scalar
 
 np.random.seed(0)
 random.seed(0)
@@ -55,7 +58,7 @@ class AttrDataset(Dataset):
 
     def __init__(self, split, args, transform=None, target_transform=None):
 
-        data_path = os.path.join("./data", f"{args.dataset}", 'custom_dataset.pkl')
+        data_path = os.path.join("./data", f"{args.dataset}", 'original_dataset.pkl')
         dataset_info = pickle.load(open(data_path, 'rb+'))
 
         img_id = dataset_info.image_name
@@ -149,7 +152,7 @@ class FeatClassifier(nn.Module):
         logits = self.classifier(feat_map)
         return logits
 
-def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None, validated=False):
+def get_pedestrian_metrics(epoch, gt_label, preds_probs, threshold=0.5, log_file=None, validated=False):
     pred_label = preds_probs > threshold
 
     eps = 1e-20
@@ -211,6 +214,8 @@ def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None, 
     # Log per-class metrics
     if log_file and validated:
         with open(log_file, "a") as f:
+            f.write(f"Time: {time_str()}\n")
+            f.write(f"Epoch {epoch}:\n")
             f.write("Per-Class Metrics:\n")
             for cls in range(gt_label.shape[1]):
                 precision = true_pos[cls] / (true_pos[cls] + false_pos[cls] + eps)  # TP / (TP + FP)
@@ -219,6 +224,7 @@ def get_pedestrian_metrics(gt_label, preds_probs, threshold=0.5, log_file=None, 
                 accuracy = (true_pos[cls] + true_neg[cls]) / (true_pos[cls] + true_neg[cls] + false_pos[cls] + false_neg[cls] + eps)  # (TP + TN) / (TP + TN + FP + FN)
 
                 f.write(f"Class {cls}: Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, Accuracy: {accuracy:.4f}\n")
+            f.write("-" * 60 + "\n")
 
     return result
 
@@ -324,8 +330,8 @@ def trainer(epoch, model, train_loader, valid_loader, criterion, optimizer, lr_s
 
         lr_scheduler.step(metrics=valid_loss, epoch=i)
 
-        train_result = get_pedestrian_metrics(train_gt, train_probs, log_file=log_file, validated=False)
-        valid_result = get_pedestrian_metrics(valid_gt, valid_probs, log_file=log_file, validated=True)
+        train_result = get_pedestrian_metrics(i, train_gt, train_probs, log_file=log_file, validated=False)
+        valid_result = get_pedestrian_metrics(i, valid_gt, valid_probs, log_file=log_file, validated=True)
 
         print(f'Evaluation on test set, \n',
               'ma: {:.4f},  pos_recall: {:.4f} , neg_recall: {:.4f} \n'.format(
@@ -351,10 +357,9 @@ def trainer(epoch, model, train_loader, valid_loader, criterion, optimizer, lr_s
     return maximum, best_epoch
 
 if __name__ == "__main__":
-    save_dir = './data/PETA/'
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    os.makedirs("exp_result/resnet34", exist_ok=True)
+    
+    os.makedirs("./exp_result/original_resnet34", exist_ok=True)
 
     class Args:
         dataset = 'PETA'
@@ -395,13 +400,13 @@ if __name__ == "__main__":
     optimizer = torch.optim.SGD(param_groups, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=False)
     lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=4)
 
-    best_metric, epoch = trainer(epoch=100,
+    best_metric, epoch = trainer(epoch=200,
                                 model=model,
                                 train_loader=train_loader,
                                 valid_loader=val_loader,
                                 criterion=criterion,
                                 optimizer=optimizer,
                                 lr_scheduler=lr_scheduler,
-                                path='exp_result/resnet34/peta_feat_classifier.pth')
+                                path='exp_result/original_resnet34/peta_feat_classifier.pth')
     
     print(f'best_metrc : {best_metric} in epoch{epoch}')

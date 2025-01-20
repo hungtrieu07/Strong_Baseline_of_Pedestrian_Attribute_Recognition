@@ -72,14 +72,11 @@ def main(image_path, onnx_path, input_size):
     
     # Print the predictions
     print("Predictions:", predictions)
-    
-    predicted_class = np.argmax(predictions)
-    print(f"Predicted class: {predicted_class}")
 
 if __name__ == "__main__":
     # Input arguments
     image_path = "test_image/8.webp"  # Replace with the path to your test image
-    onnx_path = "onnx_models/resnet34.onnx"  # Replace with your ONNX model path
+    onnx_path = "onnx_models/reid_model.onnx"  # Replace with your ONNX model path
     input_size = (256, 192)  # Replace with the input size used during export
 
     # Run the main function

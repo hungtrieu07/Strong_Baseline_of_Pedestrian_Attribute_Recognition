@@ -2,7 +2,7 @@ import torch
 from models.resnet import resnet34
 
 # Path to the checkpoint
-model_path = r"exp_result\resnet34\peta_feat_classifier.pth"
+model_path = "exp_result/resnet34/peta_feat_classifier.pth"
 
 # Initialize the model
 model = resnet34()

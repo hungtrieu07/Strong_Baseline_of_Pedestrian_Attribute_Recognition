@@ -9,7 +9,7 @@ yolo_model = YOLO("yolov8n.pt")  # Replace with your YOLOv8 model path
 
 # Load OpenVINO ReID model
 core = Core()
-reid_model_path = "openvino_models/reid_model.xml"  # Path to your OpenVINO model
+reid_model_path = "openvino_models/reid/reid_model.xml"  # Path to your OpenVINO model
 reid_model = core.read_model(model=reid_model_path)
 compiled_reid_model = core.compile_model(model=reid_model, device_name="CPU")
 input_layer = compiled_reid_model.input(0)
@@ -17,19 +17,53 @@ output_layer = compiled_reid_model.output(0)
 
 # Attribute Names (Replace with your dataset's attribute list)
 ATTR_NAMES = [
-    "personalLess30", "personalLess45", "personalLess60", "personalLarger60",
-    "carryingBackpack", "accessoryHat", "hairLong", "personalMale",
-    "carryingMessengerBag", "lowerBodyShorts", "upperBodyShortSleeve",
-    "lowerBodyShortSkirt", "upperBodyBlack", "upperBodyBlue",
-    "upperBodyBrown", "upperBodyGreen", "upperBodyGrey", "upperBodyOrange",
-    "upperBodyPink", "upperBodyPurple", "upperBodyRed", "upperBodyWhite",
-    "upperBodyYellow", "lowerBodyBlack", "lowerBodyBlue", "lowerBodyBrown",
-    "lowerBodyGreen", "lowerBodyGrey", "lowerBodyOrange", "lowerBodyPink",
-    "lowerBodyPurple", "lowerBodyRed", "lowerBodyWhite", "lowerBodyYellow",
-    "personalLess15", "personalFemale", "lowerBodyLongSkirt",
-    "upperBodyLongSleeve", "carryingLuggageCase", "hairShort",
-    "carryingSuitcase"
+    "accessoryHat",
+    "hairLong",
+    "hairShort",
+    "upperBodyShortSleeve",
+    "upperBodyBlack",
+    "upperBodyBlue",
+    "upperBodyBrown",
+    "upperBodyGreen",
+    "upperBodyGrey",
+    "upperBodyOrange",
+    "upperBodyPink",
+    "upperBodyPurple",
+    "upperBodyRed",
+    "upperBodyWhite",
+    "upperBodyYellow",
+    "upperBodyLongSleeve",
+    "lowerBodyShorts",
+    "lowerBodyShortSkirt",
+    "lowerBodyBlack",
+    "lowerBodyBlue",
+    "lowerBodyBrown",
+    "lowerBodyGreen",
+    "lowerBodyGrey",
+    "lowerBodyOrange",
+    "lowerBodyPink",
+    "lowerBodyPurple",
+    "lowerBodyRed",
+    "lowerBodyWhite",
+    "lowerBodyYellow",
+    "lowerBodyLongSkirt",
+    "footwearLeatherShoes",
+    "footwearSandals",
+    "footwearShoes",
+    "footwearSneaker",
+    "carryingBackpack",
+    "carryingMessengerBag",
+    "carryingLuggageCase",
+    "carryingSuitcase",
+    "personalLess30",
+    "personalLess45",
+    "personalLess60",
+    "personalLarger60",
+    "personalLess15",
+    "personalMale",
+    "personalFemale"
 ]
+
 
 print(len(ATTR_NAMES))  # 40 attributes
 
